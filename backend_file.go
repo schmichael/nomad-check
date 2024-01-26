@@ -8,30 +8,45 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/api"
 )
 
 type FileBackend struct {
-	allocs []*api.AllocationListStub
-	nodes  []*api.NodeListStub
+	allocs     []*api.AllocationListStub
+	namespaces []*api.Namespace
+	nodes      []*api.NodeListStub
 }
 
-func NewFileBackend(allocsFn, nodesFn string) (*FileBackend, error) {
-	allocsFd, err := os.Open(allocsFn)
+type FileBackendConfig struct {
+	AllocsPath     string
+	NamespacesPath string
+	NodesPath      string
+	Logger         hclog.Logger
+}
+
+func NewFileBackend(c FileBackendConfig) (*FileBackend, error) {
+	allocsFd, err := os.Open(c.AllocsPath)
 	if err != nil {
 		return nil, fmt.Errorf("error opening allocs: %w", err)
 	}
 	defer allocsFd.Close()
 
-	nodesFd, err := os.Open(nodesFn)
+	namespacesFd, err := os.Open(c.NamespacesPath)
+	if err != nil {
+		return nil, fmt.Errorf("error opening namespaces: %w", err)
+	}
+
+	nodesFd, err := os.Open(c.NodesPath)
 	if err != nil {
 		return nil, fmt.Errorf("error opening nodes: %w", err)
 	}
 	defer nodesFd.Close()
 
 	b := FileBackend{
-		allocs: []*api.AllocationListStub{},
-		nodes:  []*api.NodeListStub{},
+		allocs:     []*api.AllocationListStub{},
+		nodes:      []*api.NodeListStub{},
+		namespaces: []*api.Namespace{},
 	}
 
 	dec := json.NewDecoder(allocsFd)
@@ -47,6 +62,13 @@ func NewFileBackend(allocsFn, nodesFn string) (*FileBackend, error) {
 		return nil, fmt.Errorf("no allocs found")
 	}
 
+	if err := json.NewDecoder(namespacesFd).Decode(&b.namespaces); err != nil {
+		return nil, fmt.Errorf("error decoding namespaces: %w", err)
+	}
+	if len(b.namespaces) == 0 {
+		return nil, fmt.Errorf("no namespaces found")
+	}
+
 	dec = json.NewDecoder(nodesFd)
 	for dec.More() {
 		n := &api.NodeListStub{}
@@ -57,14 +79,6 @@ func NewFileBackend(allocsFn, nodesFn string) (*FileBackend, error) {
 	}
 
 	return &b, nil
-}
-
-func (f *FileBackend) ListAllocs() ([]*api.AllocationListStub, error) {
-	return f.allocs, nil
-}
-
-func (f *FileBackend) ListNodes() ([]*api.NodeListStub, error) {
-	return f.nodes, nil
 }
 
 func (f *FileBackend) GetAlloc(allocID string) (*api.Allocation, error) {
@@ -139,4 +153,16 @@ func (f *FileBackend) GetNode(nodeID string) (*api.Node, error) {
 		CreateIndex:           stub.CreateIndex,
 		ModifyIndex:           stub.ModifyIndex,
 	}, nil
+}
+
+func (f *FileBackend) ListAllocs() ([]*api.AllocationListStub, error) {
+	return f.allocs, nil
+}
+
+func (f *FileBackend) ListNamespaces() ([]*api.Namespace, error) {
+	return f.namespaces, nil
+}
+
+func (f *FileBackend) ListNodes() ([]*api.NodeListStub, error) {
+	return f.nodes, nil
 }

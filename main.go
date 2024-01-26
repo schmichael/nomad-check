@@ -26,6 +26,8 @@ func main() {
 
 	allocsFn := ""
 	flag.StringVar(&allocsFn, "allocs", allocsFn, "use a json file instead of http")
+	nsFn := ""
+	flag.StringVar(&nsFn, "namespaces", nsFn, "use a json file instead of http")
 	nodesFn := ""
 	flag.StringVar(&nodesFn, "nodes", nodesFn, "use a json file instead of http")
 	flag.Parse()
@@ -53,8 +55,12 @@ func main() {
 			logger: logger,
 		}
 	} else {
-		logger.Info("Using files", "allocs", allocsFn, "nodes", nodesFn)
-		b, err := NewFileBackend(allocsFn, nodesFn)
+		logger.Info("Using files", "allocs", allocsFn, "namespaces", nsFn, "nodes", nodesFn)
+		b, err := NewFileBackend(FileBackendConfig{
+			AllocsPath:     allocsFn,
+			NamespacesPath: nsFn,
+			NodesPath:      nodesFn,
+		})
 		if err != nil {
 			logger.Error("error opening files", "error", err)
 			os.Exit(1)
@@ -86,14 +92,7 @@ func main() {
 		os.Exit(99)
 	}
 
-	logger.Info("Completed!", "results", outFn)
-}
-
-type Backend interface {
-	ListAllocs() ([]*api.AllocationListStub, error)
-	ListNodes() ([]*api.NodeListStub, error)
-	GetAlloc(allocID string) (*api.Allocation, error)
-	GetNode(nodeID string) (*api.Node, error)
+	logger.Info("Completed", "results", outFn)
 }
 
 type checker struct {
@@ -104,15 +103,18 @@ type checker struct {
 }
 
 type Results struct {
-	Complete             bool
-	NodesTotal           int
-	AllocsTotal          int
-	AllocsClientTerminal int
-	AllocsPendingTooLong []string
-	AllocsMissingNode    []string
-	AllocsDownNode       []string
-	Allocs               map[string]*api.Allocation
-	Nodes                map[string]*api.Node
+	Complete               bool
+	AllocsTotal            int
+	NamespacesTotal        int
+	NodesTotal             int
+	AllocsClientTerminal   int
+	AllocsPendingTooLong   []string
+	AllocsMissingNamespace []string
+	AllocsMissingNode      []string
+	AllocsDownNode         []string
+	NamespacesMissing      []string
+	Allocs                 map[string]*api.Allocation
+	Nodes                  map[string]*api.Node
 }
 
 func NewResults() *Results {
@@ -132,6 +134,13 @@ func (c checker) check() (*Results, error) {
 	}
 	r.NodesTotal = len(nodes)
 
+	c.logger.Info("Fetching all namespaces...")
+	namespaces, err := getNamespaces(c.backend)
+	if err != nil {
+		return r, fmt.Errorf("error listing namespaces: %w", err)
+	}
+	r.NamespacesTotal = len(namespaces)
+
 	c.logger.Info("Fetching all allocations...")
 	allocs, err := c.backend.ListAllocs()
 	if err != nil {
@@ -143,7 +152,16 @@ func (c checker) check() (*Results, error) {
 	for _, alloc := range allocs {
 		switch alloc.ClientStatus {
 		case api.AllocClientStatusComplete, api.AllocClientStatusFailed, api.AllocClientStatusLost:
+			// Ignore client terminal allocs
 			r.AllocsClientTerminal++
+			continue
+		}
+
+		// Check if non-terminal alloc's namespace exists
+		if _, ok := namespaces[alloc.Namespace]; !ok {
+			c.logger.Warn("Non-terminal allocation's namespace missing", "job", alloc.JobID, "alloc", alloc.ID, "ns", alloc.Namespace)
+			r.AllocsMissingNamespace = append(r.AllocsMissingNamespace, alloc.ID)
+			r.NamespacesMissing = append(r.NamespacesMissing, alloc.Namespace)
 		}
 
 		// Check if non-terminal alloc's been pending too long
@@ -157,6 +175,16 @@ func (c checker) check() (*Results, error) {
 		if !ok {
 			c.logger.Warn("Non-terminal allocation's node missing", "alloc", alloc.ID, "node", alloc.NodeID)
 			r.AllocsMissingNode = append(r.AllocsMissingNode, alloc.ID)
+			if _, ok := r.Allocs[alloc.ID]; ok {
+				continue
+			}
+
+			alloc, err := c.backend.GetAlloc(alloc.ID)
+			r.Allocs[alloc.ID] = alloc
+			if err != nil {
+				c.logger.Error("Error fetching alloc", "error", err, "alloc", alloc.ID)
+				continue
+			}
 			continue
 		}
 
@@ -167,7 +195,7 @@ func (c checker) check() (*Results, error) {
 		}
 	}
 
-	for _, allocList := range [][]string{r.AllocsPendingTooLong, r.AllocsMissingNode, r.AllocsDownNode} {
+	for _, allocList := range [][]string{r.AllocsPendingTooLong, r.AllocsDownNode, r.AllocsMissingNamespace} {
 		for _, allocid := range allocList {
 			if _, ok := r.Allocs[allocid]; ok {
 				continue
@@ -205,6 +233,20 @@ func getNodes(b Backend) (map[string]*api.NodeListStub, error) {
 	m := make(map[string]*api.NodeListStub, len(s))
 	for _, n := range s {
 		m[n.ID] = n
+	}
+
+	return m, nil
+}
+
+func getNamespaces(b Backend) (map[string]*api.Namespace, error) {
+	s, err := b.ListNamespaces()
+	if err != nil {
+		return nil, err
+	}
+
+	m := make(map[string]*api.Namespace, len(s))
+	for _, n := range s {
+		m[n.Name] = n
 	}
 
 	return m, nil
