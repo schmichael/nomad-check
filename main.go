@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -161,7 +162,9 @@ func (c checker) check() (*Results, error) {
 		if _, ok := namespaces[alloc.Namespace]; !ok {
 			c.logger.Warn("Non-terminal allocation's namespace missing", "job", alloc.JobID, "alloc", alloc.ID, "ns", alloc.Namespace)
 			r.AllocsMissingNamespace = append(r.AllocsMissingNamespace, alloc.ID)
-			r.NamespacesMissing = append(r.NamespacesMissing, alloc.Namespace)
+			if !slices.Contains(r.NamespacesMissing, alloc.Namespace) {
+				r.NamespacesMissing = append(r.NamespacesMissing, alloc.Namespace)
+			}
 		}
 
 		// Check if non-terminal alloc's been pending too long
